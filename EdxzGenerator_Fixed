@@ -1,0 +1,340 @@
+-- Fixed Target Aim & Aimlock Script
+-- Original script was obfuscated with MoonSec
+-- This version fixes the conflict between Target Aim and Aimlock
+
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+
+local LocalPlayer = Players.LocalPlayer
+local Mouse = LocalPlayer:GetMouse()
+
+-- Configuration
+local Config = {
+    TargetAim = {
+        Enabled = false,
+        Key = Enum.KeyCode.T, -- T tuşu ile Target Aim açma/kapama
+        FOV = 100,
+        Priority = "Closest", -- "Closest", "LowestHealth", "HighestThreat"
+        VisibilityCheck = true,
+        SmoothAiming = true,
+        SmoothSpeed = 0.5
+    },
+    AimLock = {
+        Enabled = false,
+        Key = Enum.KeyCode.L, -- L tuşu ile AimLock açma/kapama
+        FOV = 80,
+        StickyLock = true,
+        AutoSwitch = false,
+        LockTime = 2.0,
+        SmoothTransition = true,
+        TransitionSpeed = 0.3
+    },
+    General = {
+        ShowFOV = true,
+        FOVColor = Color3.fromRGB(255, 255, 255),
+        TargetColor = Color3.fromRGB(255, 0, 0),
+        TeamCheck = true,
+        WallCheck = true
+    }
+}
+
+-- Variables
+local CurrentTarget = nil
+local AimLockTarget = nil
+local TargetAimActive = false
+local AimLockActive = false
+local FOVCircle = nil
+local Connection = nil
+local LastLockTime = 0
+
+-- Utility Functions
+local function CreateFOVCircle()
+    if FOVCircle then
+        FOVCircle:Remove()
+    end
+    
+    FOVCircle = Drawing.new("Circle")
+    FOVCircle.Thickness = 2
+    FOVCircle.NumSides = 50
+    FOVCircle.Radius = Config.TargetAim.FOV
+    FOVCircle.Color = Config.General.FOVColor
+    FOVCircle.Transparency = 0.7
+    FOVCircle.Visible = Config.General.ShowFOV
+    FOVCircle.Filled = false
+end
+
+local function UpdateFOVCircle()
+    if FOVCircle then
+        FOVCircle.Position = Vector2.new(Mouse.X, Mouse.Y)
+        local activeConfig = AimLockActive and Config.AimLock or Config.TargetAim
+        FOVCircle.Radius = activeConfig.FOV
+        FOVCircle.Visible = Config.General.ShowFOV and (TargetAimActive or AimLockActive)
+    end
+end
+
+local function GetDistance(pos1, pos2)
+    return (pos1 - pos2).Magnitude
+end
+
+local function IsVisible(target)
+    if not Config.General.WallCheck then return true end
+    
+    local camera = Workspace.CurrentCamera
+    local character = LocalPlayer.Character
+    if not character then return false end
+    
+    local head = character:FindFirstChild("Head")
+    if not head then return false end
+    
+    local targetHead = target.Character and target.Character:FindFirstChild("Head")
+    if not targetHead then return false end
+    
+    local ray = Workspace:Raycast(head.Position, (targetHead.Position - head.Position).Unit * 1000)
+    return ray and ray.Instance and ray.Instance:IsDescendantOf(target.Character)
+end
+
+local function IsTeammate(target)
+    if not Config.General.TeamCheck then return false end
+    return target.Team == LocalPlayer.Team and target.Team ~= nil
+end
+
+local function GetTargetsInFOV(fov)
+    local targets = {}
+    local camera = Workspace.CurrentCamera
+    local screenSize = camera.ViewportSize
+    local screenCenter = Vector2.new(screenSize.X / 2, screenSize.Y / 2)
+    
+    for _, player in pairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer and player.Character then
+            local character = player.Character
+            local humanoid = character:FindFirstChild("Humanoid")
+            local head = character:FindFirstChild("Head")
+            
+            if humanoid and humanoid.Health > 0 and head and not IsTeammate(player) then
+                local screenPos, onScreen = camera:WorldToScreenPoint(head.Position)
+                
+                if onScreen then
+                    local distance = GetDistance(Vector2.new(screenPos.X, screenPos.Y), screenCenter)
+                    
+                    if distance <= fov and IsVisible(player) then
+                        table.insert(targets, {
+                            Player = player,
+                            Distance = distance,
+                            ScreenPosition = Vector2.new(screenPos.X, screenPos.Y),
+                            Health = humanoid.Health,
+                            MaxHealth = humanoid.MaxHealth
+                        })
+                    end
+                end
+            end
+        end
+    end
+    
+    return targets
+end
+
+local function SelectTarget(targets, priority)
+    if #targets == 0 then return nil end
+    
+    if priority == "Closest" then
+        table.sort(targets, function(a, b) return a.Distance < b.Distance end)
+    elseif priority == "LowestHealth" then
+        table.sort(targets, function(a, b) return a.Health < b.Health end)
+    elseif priority == "HighestThreat" then
+        table.sort(targets, function(a, b) 
+            local aThreat = (a.MaxHealth - a.Health) / a.Distance
+            local bThreat = (b.MaxHealth - b.Health) / b.Distance
+            return aThreat > bThreat 
+        end)
+    end
+    
+    return targets[1]
+end
+
+local function SmoothAim(targetPos, speed)
+    local camera = Workspace.CurrentCamera
+    local currentPos = Vector2.new(Mouse.X, Mouse.Y)
+    local difference = targetPos - currentPos
+    
+    if difference.Magnitude > 1 then
+        local smoothPos = currentPos + (difference * speed)
+        mousemoverel(smoothPos.X - currentPos.X, smoothPos.Y - currentPos.Y)
+    end
+end
+
+-- Target Aim Logic
+local function HandleTargetAim()
+    if not TargetAimActive then return end
+    
+    local targets = GetTargetsInFOV(Config.TargetAim.FOV)
+    local target = SelectTarget(targets, Config.TargetAim.Priority)
+    
+    if target then
+        CurrentTarget = target
+        
+        -- AimLock ile çakışmayı önlemek için kontrol
+        if not AimLockActive then
+            if Config.TargetAim.SmoothAiming then
+                SmoothAim(target.ScreenPosition, Config.TargetAim.SmoothSpeed)
+            else
+                mousemoveabs(target.ScreenPosition.X, target.ScreenPosition.Y)
+            end
+        end
+    else
+        CurrentTarget = nil
+    end
+end
+
+-- AimLock Logic
+local function HandleAimLock()
+    if not AimLockActive then return end
+    
+    local currentTime = tick()
+    
+    -- Mevcut hedef varsa ve süre dolmamışsa devam et
+    if AimLockTarget then
+        local character = AimLockTarget.Player.Character
+        if character and character:FindFirstChild("Head") then
+            local humanoid = character:FindFirstChild("Humanoid")
+            if humanoid and humanoid.Health > 0 then
+                local camera = Workspace.CurrentCamera
+                local screenPos, onScreen = camera:WorldToScreenPoint(character.Head.Position)
+                
+                if onScreen and IsVisible(AimLockTarget.Player) then
+                    local screenCenter = Vector2.new(camera.ViewportSize.X / 2, camera.ViewportSize.Y / 2)
+                    local distance = GetDistance(Vector2.new(screenPos.X, screenPos.Y), screenCenter)
+                    
+                    -- FOV içinde ve süre dolmamışsa kilidi koru
+                    if distance <= Config.AimLock.FOV and (currentTime - LastLockTime) < Config.AimLock.LockTime then
+                        if Config.AimLock.SmoothTransition then
+                            SmoothAim(Vector2.new(screenPos.X, screenPos.Y), Config.AimLock.TransitionSpeed)
+                        else
+                            mousemoveabs(screenPos.X, screenPos.Y)
+                        end
+                        return
+                    end
+                end
+            end
+        end
+        
+        -- Hedef kayboldu veya süre doldu, kilidi kaldır
+        AimLockTarget = nil
+    end
+    
+    -- Yeni hedef ara (sadece otomatik geçiş aktifse)
+    if Config.AimLock.AutoSwitch or not AimLockTarget then
+        local targets = GetTargetsInFOV(Config.AimLock.FOV)
+        local target = SelectTarget(targets, "Closest")
+        
+        if target then
+            AimLockTarget = target
+            LastLockTime = currentTime
+            
+            if Config.AimLock.SmoothTransition then
+                SmoothAim(target.ScreenPosition, Config.AimLock.TransitionSpeed)
+            else
+                mousemoveabs(target.ScreenPosition.X, target.ScreenPosition.Y)
+            end
+        end
+    end
+end
+
+-- Main Update Loop - DÜZELTME: Her iki sistem de birlikte çalışabilir
+local function UpdateAimSystems()
+    UpdateFOVCircle()
+    
+    -- Önce AimLock kontrol et (daha yüksek öncelik)
+    if AimLockActive then
+        HandleAimLock()
+    -- AimLock aktif değilse Target Aim kullan
+    elseif TargetAimActive then
+        HandleTargetAim()
+    end
+end
+
+-- Input Handlers
+local function OnKeyPress(key, gameProcessed)
+    if gameProcessed then return end
+    
+    if key.KeyCode == Config.TargetAim.Key then
+        TargetAimActive = not TargetAimActive
+        print("Target Aim: " .. (TargetAimActive and "AÇIK" or "KAPALI"))
+        
+        if not TargetAimActive then
+            CurrentTarget = nil
+        end
+    elseif key.KeyCode == Config.AimLock.Key then
+        AimLockActive = not AimLockActive
+        print("AimLock: " .. (AimLockActive and "AÇIK" or "KAPALI"))
+        
+        if AimLockActive then
+            LastLockTime = tick()
+        else
+            AimLockTarget = nil
+        end
+    end
+end
+
+-- Initialize
+local function Initialize()
+    CreateFOVCircle()
+    
+    -- Input bağlantıları
+    UserInputService.InputBegan:Connect(OnKeyPress)
+    
+    -- Ana döngü
+    Connection = RunService.Heartbeat:Connect(UpdateAimSystems)
+    
+    print("=== AIM SCRIPT YÜKLENDİ ===")
+    print("Target Aim: " .. Config.TargetAim.Key.Name .. " tuşu")
+    print("AimLock: " .. Config.AimLock.Key.Name .. " tuşu")
+    print("FOV Gösterimi: " .. (Config.General.ShowFOV and "AÇIK" or "KAPALI"))
+    print("==============================")
+end
+
+-- Cleanup function
+local function Cleanup()
+    if Connection then
+        Connection:Disconnect()
+        Connection = nil
+    end
+    
+    if FOVCircle then
+        FOVCircle:Remove()
+        FOVCircle = nil
+    end
+    
+    TargetAimActive = false
+    AimLockActive = false
+    CurrentTarget = nil
+    AimLockTarget = nil
+end
+
+-- Mouse functions (these need to be defined based on your executor)
+function mousemoverel(x, y)
+    -- Executor-specific relative mouse movement
+    -- Replace with your executor's function
+    if mousemoverel then
+        mousemoverel(x, y)
+    end
+end
+
+function mousemoveabs(x, y)
+    -- Executor-specific absolute mouse movement
+    -- Replace with your executor's function
+    if mousemoveabs then
+        mousemoveabs(x, y)
+    end
+end
+
+-- Start the script
+Initialize()
+
+-- Cleanup on script unload
+game:GetService("Players").PlayerRemoving:Connect(function(player)
+    if player == LocalPlayer then
+        Cleanup()
+    end
+end)
